@@ -1,0 +1,18 @@
+# Compiled ARM executables
+hello
+camera_monitor
+camera_monitor_v2
+camera_protocol_monitor
+camera_protocol_monitor_v2
+camera_protocol_monitor_v3
+camera_protocol_monitor_v4
+acl_l4_monitor
+ksz_control
+cctv_guard
+
+# Build files
+*.o
+
+# Temporary files
+*.bak
+*~
