@@ -1,23 +1,15 @@
 import socket
 import time
 
-TARGET = "192.168.1.10"
-PORT = 55559
-INTERFACE_IP = "192.168.1.25"
-PAYLOAD = b"hello omid"
+CAMERA_IP = "192.168.1.10"
+PORT = 5005
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((INTERFACE_IP, 0))
 
-print(f"Sending {PAYLOAD.decode()!r} to {TARGET}:{PORT}")
-print("Ctrl+C to stop")
+payload = b"HELLO_OMID_" + b"X" * 990
 
-try:
-    while True:
-        sock.sendto(PAYLOAD, (TARGET, PORT))
-        print(f"sent UDP payload: {PAYLOAD.decode()!r}")
-        time.sleep(0.1)
-except KeyboardInterrupt:
-    print("\nStopped.")
-finally:
-    sock.close()
+for i in range(1000):
+    sock.sendto(payload, (CAMERA_IP, PORT))
+    time.sleep(0.01)
+
+print("Sent 1000 packets")

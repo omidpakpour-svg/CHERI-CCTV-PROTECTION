@@ -8,6 +8,8 @@
  *
  * Features:
  *   - Filters IPv4 traffic involving the camera
+ *   - Captures mirrored Ethernet frames in promiscuous mode
+ *   - Accepts untagged and VLAN-tagged IPv4 frames
  *   - Shows TCP, UDP and ICMP
  *   - Shows source and destination IP addresses
  *   - Shows source and destination TCP/UDP ports
@@ -794,6 +796,35 @@ static void display_dashboard(double elapsed_seconds)
 /* Main                                                      */
 /* --------------------------------------------------------- */
 
+/* Return the IPv4 offset, or zero for other or truncated frames. */
+static size_t ipv4_frame_offset(const unsigned char *buffer,
+                                size_t packet_length)
+{
+    size_t offset = sizeof(struct ethhdr);
+    uint16_t ethernet_type;
+
+    if (packet_length < offset)
+        return 0;
+
+    memcpy(&ethernet_type, buffer + offset - sizeof(ethernet_type),
+           sizeof(ethernet_type));
+    ethernet_type = ntohs(ethernet_type);
+
+    while ((ethernet_type == ETH_P_8021Q) ||
+           (ethernet_type == ETH_P_8021AD))
+    {
+        /* Each VLAN header is a two-byte TCI and a two-byte EtherType. */
+        if (packet_length - offset < 4)
+            return 0;
+
+        memcpy(&ethernet_type, buffer + offset + 2, sizeof(ethernet_type));
+        ethernet_type = ntohs(ethernet_type);
+        offset += 4;
+    }
+
+    return (ethernet_type == ETH_P_IP) ? offset : 0;
+}
+
 int main(void)
 {
     int socket_fd;
@@ -802,6 +833,7 @@ int main(void)
 
     struct ifreq interface_request;
     struct sockaddr_ll bind_address;
+    struct packet_mreq membership = {0};
 
     uint32_t camera_ip;
 
@@ -914,6 +946,17 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    membership.mr_ifindex = bind_address.sll_ifindex;
+    membership.mr_type = PACKET_MR_PROMISC;
+
+    if (setsockopt(socket_fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
+                   &membership, sizeof(membership)) < 0)
+    {
+        perror("Cannot enable promiscuous capture on " INTERFACE_NAME);
+        close(socket_fd);
+        return EXIT_FAILURE;
+    }
+
     /*
      * Clear the terminal once and hide the cursor.
      */
@@ -931,10 +974,7 @@ int main(void)
         ssize_t received_length;
         size_t packet_length;
 
-        struct ethhdr *ethernet_header;
         struct iphdr *ip_header;
-
-        unsigned short ethernet_type;
 
         size_t ip_offset;
         size_t ip_header_length;
@@ -955,100 +995,41 @@ int main(void)
             packet_length =
                 (size_t)received_length;
 
-            if (packet_length >=
-                sizeof(struct ethhdr))
+            ip_offset = ipv4_frame_offset(buffer, packet_length);
+
+            if ((ip_offset != 0) &&
+                (packet_length - ip_offset >= sizeof(struct iphdr)))
             {
-                ethernet_header =
-                    (struct ethhdr *)buffer;
+                ip_header = (struct iphdr *)(buffer + ip_offset);
+                ip_header_length = (size_t)ip_header->ihl * 4U;
 
-                ethernet_type =
-                    ntohs(ethernet_header->h_proto);
-
-                /*
-                 * This version processes normal, untagged IPv4
-                 * Ethernet frames.
-                 */
-                if (ethernet_type == ETH_P_IP)
+                if ((ip_header_length >= sizeof(struct iphdr)) &&
+                    (packet_length - ip_offset >= ip_header_length) &&
+                    ((ip_header->saddr == camera_ip) ||
+                     (ip_header->daddr == camera_ip)))
                 {
-                    ip_offset =
-                        sizeof(struct ethhdr);
+                    if (ip_header->saddr == camera_ip)
+                        statistics.from_camera_bytes += packet_length;
 
-                    if (packet_length >=
-                        ip_offset +
-                        sizeof(struct iphdr))
+                    if (ip_header->daddr == camera_ip)
+                        statistics.to_camera_bytes += packet_length;
+
+                    switch (ip_header->protocol)
                     {
-                        ip_header =
-                            (struct iphdr *)
-                            (buffer + ip_offset);
+                        case IPPROTO_TCP:
+                            process_tcp(buffer, packet_length, ip_offset, ip_header);
+                            break;
 
-                        ip_header_length =
-                            (size_t)ip_header->ihl * 4U;
+                        case IPPROTO_UDP:
+                            process_udp(buffer, packet_length, ip_offset, ip_header);
+                            break;
 
-                        if ((ip_header_length >=
-                             sizeof(struct iphdr)) &&
-                            (packet_length >=
-                             ip_offset +
-                             ip_header_length))
-                        {
-                            /*
-                             * Keep only camera-related traffic.
-                             */
-                            if ((ip_header->saddr ==
-                                 camera_ip) ||
-                                (ip_header->daddr ==
-                                 camera_ip))
-                            {
-                                if (ip_header->saddr ==
-                                    camera_ip)
-                                {
-                                    statistics
-                                        .from_camera_bytes +=
-                                        packet_length;
-                                }
+                        case IPPROTO_ICMP:
+                            process_icmp(packet_length, ip_header);
+                            break;
 
-                                if (ip_header->daddr ==
-                                    camera_ip)
-                                {
-                                    statistics
-                                        .to_camera_bytes +=
-                                        packet_length;
-                                }
-
-                                switch (ip_header->protocol)
-                                {
-                                    case IPPROTO_TCP:
-
-                                        process_tcp(
-                                            buffer,
-                                            packet_length,
-                                            ip_offset,
-                                            ip_header);
-
-                                        break;
-
-                                    case IPPROTO_UDP:
-
-                                        process_udp(
-                                            buffer,
-                                            packet_length,
-                                            ip_offset,
-                                            ip_header);
-
-                                        break;
-
-                                    case IPPROTO_ICMP:
-
-                                        process_icmp(
-                                            packet_length,
-                                            ip_header);
-
-                                        break;
-
-                                    default:
-                                        break;
-                                }
-                            }
-                        }
+                        default:
+                            break;
                     }
                 }
             }
